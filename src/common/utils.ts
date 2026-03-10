@@ -123,6 +123,14 @@ export async function makeApiRequest<T>(
 	return ( await response.json() ) as T;
 }
 
+export async function makeActionApiRequest<T>(
+	params: Record<string, string>
+): Promise<T> {
+	const { server, scriptpath } = wikiService.getCurrent().config;
+	const apiUrl = `${ server }${ scriptpath || '/w' }/api.php`;
+	return makeApiRequest<T>( apiUrl, { ...params, format: 'json' } );
+}
+
 export async function makeRestGetRequest<T>(
 	path: string,
 	params?: Record<string, string>,

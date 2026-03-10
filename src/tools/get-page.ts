@@ -3,9 +3,33 @@ import { z } from 'zod';
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult, TextContent, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 /* eslint-enable n/no-missing-import */
-import { makeRestGetRequest } from '../common/utils.js';
-import type { MwRestApiPageObject } from '../types/mwRestApi.js';
-import { ContentFormat, getSubEndpoint } from '../common/mwRestApiContentFormat.js';
+import { makeActionApiRequest } from '../common/utils.js';
+import { ContentFormat } from '../common/mwRestApiContentFormat.js';
+
+interface ActionApiQueryPage {
+	pageid: number;
+	title: string;
+	contentmodel?: string;
+	lastrevid?: number;
+	missing?: string;
+	revisions?: Array<{ timestamp?: string }>;
+}
+
+interface ActionApiQueryResponse {
+	query?: {
+		pages?: Record<string, ActionApiQueryPage>;
+	};
+}
+
+interface ActionApiParseResponse {
+	parse?: {
+		title: string;
+		pageid: number;
+		wikitext?: { '*': string };
+		text?: { '*': string };
+	};
+	error?: { info: string };
+}
 
 export function getPageTool( server: McpServer ): RegisteredTool {
 	return server.tool(
@@ -39,12 +63,76 @@ async function handleGetPageTool(
 	}
 
 	try {
-		const data = await makeRestGetRequest<MwRestApiPageObject>(
-			`/v1/page/${ encodeURIComponent( title ) }${ getSubEndpoint( content ) }`
-		);
-		return {
-			content: getPageToolResult( data, content, metadata )
-		};
+		const results: TextContent[] = [];
+
+		// Fetch metadata if requested or needed for "none" content
+		if ( metadata || content === ContentFormat.none ) {
+			const metaData = await makeActionApiRequest<ActionApiQueryResponse>( {
+				action: 'query',
+				titles: title,
+				prop: 'info|revisions'
+			} );
+
+			const pages = metaData.query?.pages || {};
+			const page = Object.values( pages )[ 0 ];
+
+			if ( page?.missing !== undefined ) {
+				throw new Error( `Page "${ title }" not found` );
+			}
+
+			results.push( {
+				type: 'text',
+				text: [
+					`Page ID: ${ page.pageid }`,
+					`Title: ${ page.title }`,
+					`Latest revision ID: ${ page.lastrevid }`,
+					`Latest revision timestamp: ${ page.revisions?.[ 0 ]?.timestamp ?? 'Not available' }`,
+					`Content model: ${ page.contentmodel }`
+				].join( '\n' )
+			} );
+		}
+
+		// Fetch source (wikitext)
+		if ( content === ContentFormat.source ) {
+			const parseData = await makeActionApiRequest<ActionApiParseResponse>( {
+				action: 'parse',
+				page: title,
+				prop: 'wikitext'
+			} );
+
+			if ( parseData.error ) {
+				throw new Error( parseData.error.info );
+			}
+
+			const source = parseData.parse?.wikitext?.[ '*' ] ?? 'Not available';
+			if ( metadata ) {
+				results.push( { type: 'text', text: `Source:\n${ source }` } );
+			} else {
+				return { content: [ { type: 'text', text: source } ] };
+			}
+		}
+
+		// Fetch HTML
+		if ( content === ContentFormat.html ) {
+			const parseData = await makeActionApiRequest<ActionApiParseResponse>( {
+				action: 'parse',
+				page: title,
+				prop: 'text'
+			} );
+
+			if ( parseData.error ) {
+				throw new Error( parseData.error.info );
+			}
+
+			const html = parseData.parse?.text?.[ '*' ] ?? 'Not available';
+			if ( metadata ) {
+				results.push( { type: 'text', text: `HTML:\n${ html }` } );
+			} else {
+				return { content: [ { type: 'text', text: html } ] };
+			}
+		}
+
+		return { content: results };
 	} catch ( error ) {
 		return {
 			content: [
@@ -53,55 +141,4 @@ async function handleGetPageTool(
 			isError: true
 		};
 	}
-}
-
-function getPageToolResult(
-	result: MwRestApiPageObject, content: ContentFormat, metadata: boolean
-): TextContent[] {
-	if ( content === ContentFormat.source && !metadata ) {
-		return [ {
-			type: 'text',
-			text: result.source ?? 'Not available'
-		} ];
-	}
-
-	if ( content === ContentFormat.html && !metadata ) {
-		return [ {
-			type: 'text',
-			text: result.html ?? 'Not available'
-		} ];
-	}
-
-	const results: TextContent[] = [ getPageMetadataTextContent( result ) ];
-
-	if ( result.source !== undefined ) {
-		results.push( {
-			type: 'text',
-			text: `Source:\n${ result.source }`
-		} );
-	}
-
-	if ( result.html !== undefined ) {
-		results.push( {
-			type: 'text',
-			text: `HTML:\n${ result.html }`
-		} );
-	}
-
-	return results;
-}
-
-function getPageMetadataTextContent( result: MwRestApiPageObject ): TextContent {
-	return {
-		type: 'text',
-		text: [
-			`Page ID: ${ result.id }`,
-			`Title: ${ result.title }`,
-			`Latest revision ID: ${ result.latest.id }`,
-			`Latest revision timestamp: ${ result.latest.timestamp }`,
-			`Content model: ${ result.content_model }`,
-			`License: ${ result.license.url } ${ result.license.title }`,
-			`HTML URL: ${ result.html_url ?? 'Not available' }`
-		].join( '\n' )
-	};
 }

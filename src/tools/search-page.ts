@@ -5,8 +5,21 @@ import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server
 import type { CallToolResult, TextContent, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 /* eslint-enable n/no-missing-import */
 import { wikiService } from '../common/wikiService.js';
-import { makeRestGetRequest } from '../common/utils.js';
-import type { MwRestApiSearchPageResponse, MwRestApiSearchResultObject } from '../types/mwRestApi.js';
+import { makeActionApiRequest } from '../common/utils.js';
+
+interface ActionApiSearchResult {
+	ns: number;
+	title: string;
+	pageid: number;
+	snippet?: string;
+	timestamp?: string;
+}
+
+interface ActionApiSearchResponse {
+	query?: {
+		search?: ActionApiSearchResult[];
+	};
+}
 
 export function searchPageTool( server: McpServer ): RegisteredTool {
 	// TODO: Not having named parameters is a pain,
@@ -28,12 +41,14 @@ export function searchPageTool( server: McpServer ): RegisteredTool {
 }
 
 async function handleSearchPageTool( query: string, limit?: number ): Promise< CallToolResult > {
-	let data: MwRestApiSearchPageResponse;
+	let data: ActionApiSearchResponse;
 	try {
-		data = await makeRestGetRequest<MwRestApiSearchPageResponse>(
-			'/v1/search/page',
-			{ q: query, ...( limit ? { limit: limit.toString() } : {} ) }
-		);
+		data = await makeActionApiRequest<ActionApiSearchResponse>( {
+			action: 'query',
+			list: 'search',
+			srsearch: query,
+			...( limit ? { srlimit: limit.toString() } : {} )
+		} );
 	} catch ( error ) {
 		return {
 			content: [
@@ -43,7 +58,7 @@ async function handleSearchPageTool( query: string, limit?: number ): Promise< C
 		};
 	}
 
-	const pages = data.pages || [];
+	const pages = data.query?.search || [];
 	if ( pages.length === 0 ) {
 		return {
 			content: [
@@ -58,16 +73,17 @@ async function handleSearchPageTool( query: string, limit?: number ): Promise< C
 }
 
 // TODO: Decide how to handle the tool's result
-function getSearchResultToolResult( result: MwRestApiSearchResultObject ): TextContent {
+function getSearchResultToolResult( result: ActionApiSearchResult ): TextContent {
 	const { server, articlepath } = wikiService.getCurrent().config;
+	// Strip HTML tags from snippet
+	const snippet = ( result.snippet || '' ).replace( /<[^>]*>/g, '' );
 	return {
 		type: 'text',
 		text: [
 			`Title: ${ result.title }`,
-			`Description: ${ result.description ?? 'Not available' }`,
-			`Page ID: ${ result.id }`,
-			`Page URL: ${ `${ server }${ articlepath }/${ result.key }` }`,
-			`Thumbnail URL: ${ result.thumbnail?.url ?? 'Not available' }`
+			`Description: ${ snippet }`,
+			`Page ID: ${ result.pageid }`,
+			`Page URL: ${ `${ server }${ articlepath }/${ encodeURIComponent( result.title ) }` }`
 		].join( '\n' )
 	};
 }
